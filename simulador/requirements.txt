@@ -1,0 +1,6 @@
+python-can>=4.3
+aiohttp>=3.9
+pyserial>=3.5
+# candleLight/gs_usb no Mac (libusb: brew install libusb)
+gs_usb; sys_platform == "darwin"
+pyusb; sys_platform == "darwin"

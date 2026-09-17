@@ -2,82 +2,56 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+## O que é
 
-This is a **marine propulsion control system simulator** built for Marine Telematics. It consists of self-contained HTML files (no build step, no dependencies, open directly in a browser) that simulate a twin-screw leisure boat with optional bow and stern thrusters.
+Simulador de manobra de atracação da Marine Telematics para boatshow: um barco
+com dois motores (e thrusters opcionais) numa marina, jogado com joystick na
+tela, gamepad USB, manetes na tela, ou o **hardware real** (manetes CM300HD,
+joystick CM04) via CAN. Cronômetro, ranking por categoria, game over por colisão.
 
-## Files
+## Arquivos
 
-| File | Purpose |
-|------|---------|
-| `propulsion_scene.html` | **Main active file.** Full physics simulator: boat moves near an L-shaped pier, dual view modes (normal + ego-centric), all propulsion logic. |
-| `propulsion_validator.html` | Static visualizer: boat SVG + joystick + thrust readouts. No physics/movement — use for validating control logic in isolation. |
-| `propulsion_scene_ego.html` | Legacy ego-only version, kept as backup. Superseded by `propulsion_scene.html`. |
-| `iate_top_view.svg` | Original boat top-view icon (300×420 viewBox). Not actively edited. |
+| Arquivo | Papel |
+|---|---|
+| `propulsion_scene.html` | **O simulador.** Um arquivo só (~4000 linhas): CSS, SVG dos 3 cascos e dos 3 cenários, e o JS. |
+| `can_adapter.py` | Ponte CAN ↔ WebSocket (python-can + aiohttp). Serve o HTML em `/`, acha o USB-CAN sozinho, emula as ECUs CM03, persiste o ranking. |
+| `simulador.command` / `simulador.sh` | Launcher (Mac / Linux): venv na 1ª vez, sobe o adapter, que abre o browser. |
+| `requirements.txt` | Deps do adapter. gs_usb/pyusb só no Mac. |
+| `propulsion_validator.html` | Visualizador estático da lógica de zonas do joystick, sem física. |
+| `iate_top_view.svg` | Ícone original do iate. Não editado. |
 
-## Architecture of `propulsion_scene.html`
+## Rodar
 
-The file is a single ~1250-line HTML/CSS/JS file. Logic flows in this order:
+- **Boatshow:** duplo clique em `simulador.command` (Mac) ou `./simulador.sh` (Linux). Abre `http://127.0.0.1:8765/`. PEAK no Mac exige a libPCBUSB (mac-can) instalada.
+- **Sem hardware:** abrir `propulsion_scene.html` direto no browser. A seção Hardware fica em "sem adapter, tentando…", inofensivo.
+- **Teste do adapter:** `python3 can_adapter.py --selftest` (bus virtual: MTNet, engate, navigate, watchdog, auto_engage, master). Único teste automatizado do projeto; rode após mexer no adapter.
+- **Sintaxe do JS** após editar o HTML: extrair o `<script>` e `node --check`.
+- `/adapter` na porta 8765 é a página de escolha manual de canal (raramente necessária).
 
-### 1. Joystick Input → `state` object
-- 3-axis joystick: inner circle (r < 81px) = XY drag (`surge`/`sway`), outer ring = rotation drag (`yaw`)
-- Both zones spring back to zero on release
-- `state = { surge, sway, yaw }` — all values in [-1, 1]
+## Fluxo do `propulsion_scene.html` (na ordem em que o JS está)
 
-### 2. `calcThrust()` — Zone-based propulsion rules
-Converts joystick state into motor commands `thrust = { port, stbd, bow, stern }`:
-- **Yaw ring active** (`|yaw| > 0.015`): differential motor mode — port and stbd run opposite
-- **Zone 1** (`|surge| ≥ 2×|sway|`): both motors equal (straight ahead/astern)
-- **Zone 2** (`|sway| ≥ 2×|surge|`): thrusters only, motors off
-- **Zone 3** (diagonal): single motor (port for starboard sway, stbd for port sway)
-- Bow/stern thruster buttons (`bowBtn`, `sternBtn`) layer on top of joystick-derived commands
-- `hasBow`/`hasStern` flags gate thruster commands
+1. **Perfis de embarcação** (`vesselProfiles`): dimensões em px, thrusters instalados, constantes físicas e `responseTau` (inércia). `applyVesselProfile()` copia as constantes para as variáveis globais `ACCEL`, `ANG_ACCEL`, … e troca o SVG ativo.
+2. **Ganhos** (sliders 5 a 100%) e **Ambiente** (vento: direção DE onde vem; correnteza: direção PARA onde vai).
+3. **Entradas** → `state = {surge, sway, yaw}` (joystick de tela ou gamepad) ou `manetePort`/`maneteStbd` (manetes de tela ou hardware). `controlMode` decide qual vale.
+4. **`calcThrust()`** → `thrust = {port, stbd, bow, stern}`. Joystick: zonas (yaw anel → diferencial; |surge| ≥ 2|sway| → ambos; |sway| ≥ 2|surge| → só thrusters; diagonal → um motor). Manetes de tela: curva F-N-R (`maneteToThrust`: neutro < 0.10, engajado/idle < 0.25, aceleração acima). **Hardware não passa pela curva:** `hwApplyNav` põe gear+throttle direto em `hwThrust` (neutro 0, engatado sem throttle = `MANETE_IDLE`, senão throttle/100); a posição do handle na tela é só visual. Thrusters da tela e do hardware são somados; têm rampa (`THRUSTER_RAMP`).
+5. **`updatePhysics()`**: forças no referencial do casco → mundo, massa relativa vem de `responseTau`, joystick passa por "DP" (60% de autoridade, 1.6× de inércia), prop walk, vento com weathervane, correnteza, limites da cena, e **colisão por pontos do casco** (elipse de 16 pontos contra AABBs de `OBSTACLES`; impacto > `GAMEOVER_IMPACT` = game over).
+6. **Passo fixo:** o game loop acumula tempo e integra em fatias de 1/60 s; render é por frame. Não voltar a integrar por frame: em tela de 120 Hz o barco anda o dobro.
+7. **Cenários** (`SCENARIOS`): spawn (`dock`), vaga-alvo (`target` com `align` ew/ns) e obstáculos. Cada um tem um grupo SVG `#scn-<id>` em `#world-g`. `applyScenario()` troca tudo.
+8. **Cronômetro**: começa no 1º comando, termina com o casco inteiro dentro da vaga, parado, alinhado, por 1,5 s → modal de fim e ranking.
+9. **Ranking**: categoria = cenário · dificuldade · tipo de controle (cm04/cm05/cm300hd) · gênero. Fonte de verdade é `ranking.json` via `/ranking` do adapter quando servido por http; `localStorage` é fallback e é migrado na 1ª carga. Nomes passam por `escHtml`.
+10. **Hardware CAN**: WebSocket na mesma origem, conecta sozinho e reconecta para sempre (backoff 1→5 s). Eventos `sim` com `by` trocam o tipo de controle do ranking e forçam modo manetes (`hwSetSource`). Arrasto das manetes de tela é bloqueado só depois que um posto físico comandou (`hwActiveSource`).
+11. **Resets**: `resetBoat()` (spawn, velocidades, rastro) e `resetControls()` (todas as entradas). Use-os; não copie a sequência.
 
-### 3. `updatePhysics()` — Forces in body frame → world frame
-Key physics constants (tune via sliders):
-```
-ACCEL=0.11, ANG_ACCEL=0.0022, THR_SWAY=0.010, BOW_TORQUE=0.0010,
-STERN_TORQUE=0.0010, PROP_WALK=0.022, DRAG=0.94, ANG_DRAG=0.88
-```
-Force pipeline each frame:
-1. `netSurge` → forward/backward push along `fwdX/fwdY`
-2. `netYaw` → rotation, scaled by `fwdFactor` (0.40 forward = larger turning circle, 1.80 reverse = tighter)
-3. `netSway_thr` + `netYaw_thr` → thruster lateral force + independent torque per end
-4. `netSway_propwalk` → prop walk / paddle-wheel effect (`(-port + stbd) × PROP_WALK`); BB avante drifts left, BE avante drifts right, both equal = cancels
-5. Drag applied to all velocities
-6. Boundary + pier collision (L-shaped: vertical dock x=6–70 y=80–376; finger x=70–246 y=6–48)
+## Contrato WebSocket (adapter → HTML)
 
-Body↔world transform: `fwdX=sin(h)`, `fwdY=-cos(h)`, `sidX=cos(h)`, `sidY=sin(h)`
+`status` (searching / connected / reconnecting) · `state` ~1 Hz com `master` e as ECUs (throttle já efetivo) · `sim` (engage com `ack`, navigate com gear/throttle **aplicados**, navigate_ignored, watchdog_safe aos 200 ms, watchdog_disengage a 1 s, ctr_status com `commanding`; todos com `by` e `ctrl`) · `frame` cru. Eventos `thruster` **não** são emitidos.
 
-### 4. View Modes (toggled by `#btn-mode`)
-- **Normal mode**: boat div moves via `style.left/top/transform:rotate()`; `worldG` SVG group has no transform
-- **Ego-centric mode**: boat div fixed at screen center `(SCENE_CX-48, SCENE_CY-89.5)`; `worldG` gets `translate(cx,cy) rotate(-deg) translate(-bx,-by)`; compass needle counter-rotates to show true north; wake points converted via `worldToScreen()`
+A emulação da ECU segue o firmware V1 v2.5.0 (fonte: sessão do repo CM03): ECUN de sender não engajado é ignorado em silêncio, sem auto-engage; troca de marcha segura throttle 0 por `GEAR_TRAVEL_S`; mode do ECUN é ignorado (a manete já escala Dock a 20 % antes de mandar). A manete CM300HD 2.7.0 manda ECUN a 20 ms só para ECU que publicou ECUStatus nos últimos 500 ms: **sem ECUS emulado a manete fica muda**. O adapter nunca transmite com origem 0x21–0x24 (a manete detectaria colisão e pararia).
 
-### 5. Individual Gain Sliders
-Each physics function has an independent gain variable and slider:
-- `gainSurge` / `gain-surge` — main motors forward/reverse
-- `gainYaw` / `gain-yaw` — differential turning
-- `gainBow` / `gain-bow` — bow thruster
-- `gainStern` / `gain-stern` — stern thruster
-- `gainPropWalk` / `gain-propwalk` — prop walk / motor torque effect
+## Convenções
 
-`setupGainSlider(sliderId, valId, setFn)` wires each slider to its variable and updates the `--pct` CSS custom property for the visual fill.
-
-## Key Conventions
-
-- **Port = BB (Bombordo)**, **Starboard = BE (Boreste)** — never "Estibordo" or "EB"
-- Contra-rotating props: port runs CCW forward (`invertCW=true`), starboard CW forward
-- All UI text in **pt-BR**
-- Color theme: dark navy background (`#09131f`), muted blue accents, green active state
-- Thruster buttons are **momentary** (active on mousedown/touchstart, clear on mouseup/leave/touchend)
-- Config toggles (`hasBow`/`hasStern`) in the "Equipamentos instalados" card disable the corresponding thruster rows visually and zero out their commands
-
-## Running / Editing
-
-No build tool or server needed — open any `.html` file directly in a browser. For live editing, a simple local server (e.g. `python3 -m http.server`) allows reloading without file:// restrictions.
-
-When editing `propulsion_scene.html`, the most sensitive sections are:
-- Lines ~860–895: `calcThrust()` — propulsion zone logic
-- Lines ~926–996: `updatePhysics()` — all force calculations
-- Lines ~1000–1043: view mode toggle and world/boat transforms
-- Lines ~660–695: gain slider HTML inside `.gain-wrap` div
+- **Port = BB (Bombordo)**, **Starboard = BE (Boreste)**. Nunca "Estibordo" ou "EB".
+- Hélices contra-rotativas: BB gira CCW avante (`invertCW=true`), BE CW.
+- Texto de UI em pt-BR. Tema navy escuro (`#09131f`), verde = ativo.
+- Botões de thruster são momentâneos (mousedown/touchstart até soltar).
+- Números de calibração física ficam nos perfis, não espalhados no código.

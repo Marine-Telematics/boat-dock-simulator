@@ -1,10 +1,12 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## ⚠️ Contextos de produto — abra o Claude na PASTA CERTA
 
-Este diretório virou o guarda-chuva de vários produtos MaTel, mas cada produto
-é um CONTEXTO PRÓPRIO do Claude Code (CLAUDE.md + memória próprios). Abra a
-sessão DENTRO do repo do produto, não aqui na raiz:
+Este diretório é o guarda-chuva de vários produtos MaTel, mas cada produto
+é um CONTEXTO PRÓPRIO do Claude Code (CLAUDE.md + memória + `.claude/qms.json`
+próprios). Abra a sessão DENTRO do repo do produto, não aqui na raiz:
 
 | Contexto | Pasta | Repo GitHub |
 |---|---|---|
@@ -16,7 +18,56 @@ sessão DENTRO do repo do produto, não aqui na raiz:
 | Aviação (Cirrus SR22) | `matel-aviation-fw/` + `matel-aviation-app/` | local |
 | PoC leitor de fonia ATC | `atc-radio-reader/` | local |
 
-Contratos ENTRE produtos: `handoffs/HANDOFF-*.md`. Simulador de propulsão: `simulador/`.
-Referências soltas (docs, logos, capturas): `refs/`. CLI do kanban QMS: `tools/qms.py`.
+Todas essas pastas são repos git independentes e estão no `.gitignore` daqui
+(assim como `refs/`, `matel-p4-docs/` e os spikes `p4-*`). O iVS-2008 (CM2008)
+vive FORA deste workspace, em `~/CM2008`.
 
+## O que ESTE repo versiona
 
+Só três coisas — tudo o mais é ignorado:
+
+- `handoffs/` — contratos entre produtos (ver abaixo).
+- `simulador/` — simulador de propulsão em HTML puro. Tem CLAUDE.md próprio
+  com a arquitetura; sem build, abre o `.html` no browser
+  (ou `python3 -m http.server` para evitar restrições de `file://`).
+- `tools/` — CLI e piloto do kanban MaTelQMS (ver abaixo).
+
+`README.md` na raiz é o guia de uso dos logos da marca (cores, área de
+proteção, snippets Flutter/web) — não descreve este repo.
+
+## Handoffs (`handoffs/`)
+
+Um handoff é a resposta escrita de um produto a outro: cabeçalho com
+**Data · Origem (cartão #N, quadro N) · Para (produtos/cartões destino)**, depois
+o contrato. Nomes seguem `HANDOFF-<tema>-<produto>[-<estado>].md`, e o estado
+conta a história do tema: sem sufixo = pedido, `-pronto` = o lado de origem
+implementou, `-alinhado`/`-resposta` = o outro lado respondeu. Não sobrescreva
+um handoff anterior — crie o próximo estado.
+
+`handoffs/mtcp/` é o protocolo CAN entre painel StartStop e MFD (MTCP).
+`MTCP-planilha.md` é extração fiel da planilha do fornecedor: **não editar** —
+edita-se a planilha e reextrai.
+
+## Commits
+
+Conventional commits em pt-BR com escopo: `docs(mtcp): …`, `feat: …`, `fix: …`,
+`handoff: …`. A mensagem narra a decisão (o "porquê"), não o diff.
+
+## Kanban MaTelQMS (`tools/`)
+
+- `tools/qms.py` — CLI stdlib-only (urllib) para o kanban em
+  `https://matel.ind.br/projetos/<id>`. Roda **de dentro do repo do produto**:
+  lê `.claude/qms.json` (project_id) e credenciais em
+  `~/.config/matelqms/claude.json` (fora de qualquer git). Subcomandos no
+  docstring do arquivo: `demandas`, `proxima`, `tarefa`, `mover`, `resultado`,
+  `perguntas`, `pilot-log`, `subtarefa`, `criar`.
+- `tools/qms-watch.sh` — piloto (launchd, 15 min): para cada contexto, pega o
+  próximo cartão "A fazer" do usuário Claude e dispara `claude -p "/executar <id>"`
+  headless, com trava por contexto em `.claude/.voo.lock` (trava >3h = voo
+  morto). `tools/qms-responder.sh` faz o mesmo para perguntas sem resposta no
+  card; só `qms.py pilot-resposta` fecha a pergunta.
+- `tools/qms_narra.py` — traduz o stream-json do claude em linhas pt-BR
+  postadas como `pilot_log` no card.
+- Os scripts assumem o workspace em `~/MaTel` e logs em `tools/logs/`
+  (ignorado). Se o checkout está em outro caminho, ajuste antes de instalar
+  o launchd.

@@ -24,3 +24,7 @@ tools/logs/
 # Projeto do slave do rádio C6 (referência de bancada, ~70 MB de build).
 # O binário que o produto usa vive em matel-ivs-display-p4/c6fw/.
 p4-c6-slave-2.12.12/
+
+# venv do simulador (criado pelo simulador.command)
+simulador/.venv/
+simulador/ranking.json

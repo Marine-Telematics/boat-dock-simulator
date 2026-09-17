@@ -1824,12 +1824,12 @@ header p  { font-size:9px; letter-spacing:1.5px; color:#243a52; margin-top:6px; 
       <div class="hw-section" id="hw-section">
         <div class="hw-header" id="hw-header">
           <span class="hw-dot" id="hw-dot"></span>
-          <span>Hardware CAN</span>
+          <span id="hw-title">Hardware CAN</span>
           <span style="margin-left:auto;font-size:9px;opacity:.5">▸</span>
         </div>
         <div class="hw-body" id="hw-body">
           <input class="hw-url-input" id="hw-url"
-            value="ws://127.0.0.1:8765/stream?ch=virtual:test&bitrate=250000"
+            value="" placeholder="ws://127.0.0.1:8765/stream"
             spellcheck="false">
           <button class="hw-btn" id="hw-btn">Conectar</button>
           <div class="hw-status-txt" id="hw-status">desconectado</div>
@@ -2394,15 +2394,16 @@ function pollGamepad() {
 
 function calcThrust() {
   let cmdBow = 0, cmdStern = 0;
-  // Quando HW conectado, thrusters vêm do PGN J1939 (hwBow/hwStern);
-  // caso contrário, dos botões momentâneos da tela.
-  const effBow   = hwConnected ? hwBow   : bowBtn;
-  const effStern = hwConnected ? hwStern : sternBtn;
+  // Thrusters: botões da tela + hardware (PGN J1939) somados. O WebSocket
+  // fica sempre ligado, então "conectado" não significa que há um posto
+  // físico comandando — os botões da tela precisam continuar funcionando.
+  const effBow   = clamp(bowBtn   + hwBow,   -1, 1);
+  const effStern = clamp(sternBtn + hwStern, -1, 1);
 
   if (controlMode === 'manetes') {
-    // Manetes: curva F-N-R (neutro → engate idle → aceleração 0-100%)
-    thrust.port = maneteToThrust(manetePort);
-    thrust.stbd = maneteToThrust(maneteStbd);
+    // Hardware manda gear+throttle prontos; a curva F-N-R é só da manete de tela
+    thrust.port = hwThrust.port ?? maneteToThrust(manetePort);
+    thrust.stbd = hwThrust.stbd ?? maneteToThrust(maneteStbd);
     cmdBow   = hasBow   ? clamp(effBow,   -1, 1) : 0;
     cmdStern = hasStern ? clamp(effStern, -1, 1) : 0;
   } else {
@@ -2913,10 +2914,7 @@ function applyScenario(id) {
   TARGET.cx = sc.target.cx;       TARGET.cy = sc.target.cy;
   TARGET.halfW = sc.target.halfW; TARGET.halfH = sc.target.halfH;
   TARGET.align = sc.target.align;
-  // Reposiciona o barco no spawn do cenário e limpa o rastro
-  boat.x = DOCK.x; boat.y = DOCK.y; boat.heading = DOCK.heading;
-  boat.vx = 0; boat.vy = 0; boat.vr = 0;
-  wakePoints.length = 0;
+  resetBoat();
   chronoReset();
   refreshSideRanking(); // categoria do ranking inclui o circuito
 }
@@ -3147,11 +3145,18 @@ document.addEventListener('keydown', e => {
   if ((e.key === 'p' || e.key === 'P') && e.target.tagName !== 'INPUT') setPaused(!paused);
 });
 
-function gameLoop() {
+// Física calibrada em "por frame a 60 Hz". Em telas de 120 Hz (MacBook ProMotion)
+// o barco andava o dobro. Passo fixo: acumula tempo real e integra em fatias de
+// 1/60 s; render continua a cada frame.
+const STEP_MS = 1000 / 60;
+let simAcc = 0, simPrev = performance.now();
+function gameLoop(now = performance.now()) {
   if (!paused && !gameOver) {
+    simAcc += Math.min(now - simPrev, 250);   // aba em background: sem "salto" ao voltar
     pollGamepad();
-    calcThrust();
-    updatePhysics();
+    let steps = 0;
+    while (simAcc >= STEP_MS && steps < 5) { calcThrust(); updatePhysics(); simAcc -= STEP_MS; steps++; }
+    if (steps === 5) simAcc = 0;               // máquina travou: descarta o atraso
     updateBoatTransform();
     updateOverlay();
     updateAnims();
@@ -3160,6 +3165,7 @@ function gameLoop() {
     updateInfoOverlay();
     updateChrono();
   }
+  simPrev = now;
   requestAnimationFrame(gameLoop);
 }
 
@@ -3183,29 +3189,23 @@ setupThrBtn(document.getElementById('stern-port-btn'), 'stern', -1);
 setupThrBtn(document.getElementById('stern-stbd-btn'), 'stern', +1);
 
 // ══════════════════════════════════════════════════
-// RESET BUTTONS
+// RESET — barco no spawn / comandos zerados (usados por botões, perfil, cenário, modais)
 // ══════════════════════════════════════════════════
-document.getElementById('btn-reset').addEventListener('click', () => {
-  state.surge=0; state.sway=0; state.yaw=0;
-  bowBtn=0; sternBtn=0;
-  joyHandle.style.transform='translate(-50%,-50%)';
-  document.querySelectorAll('.thr-btn').forEach(b=>b.classList.remove('active'));
-  manetePort=0; maneteStbd=0;
+function resetBoat() {
+  boat.x = DOCK.x; boat.y = DOCK.y; boat.heading = DOCK.heading;
+  boat.vx = 0; boat.vy = 0; boat.vr = 0;
+  wakePoints.length = 0;
+}
+function resetControls() {
+  state.surge = 0; state.sway = 0; state.yaw = 0;
+  bowBtn = 0; sternBtn = 0;
+  joyHandle.style.transform = 'translate(-50%,-50%)';
+  document.querySelectorAll('.thr-btn').forEach(b => b.classList.remove('active'));
+  manetePort = 0; maneteStbd = 0;
   updateManeteVisual('port'); updateManeteVisual('stbd');
-});
-
-document.getElementById('btn-dock').addEventListener('click', () => {
-  boat.x=DOCK.x; boat.y=DOCK.y; boat.heading=DOCK.heading;
-  boat.vx=0; boat.vy=0; boat.vr=0;
-  wakePoints.length=0;
-  state.surge=0; state.sway=0; state.yaw=0;
-  bowBtn=0; sternBtn=0;
-  joyHandle.style.transform='translate(-50%,-50%)';
-  document.querySelectorAll('.thr-btn').forEach(b=>b.classList.remove('active'));
-  manetePort=0; maneteStbd=0;
-  updateManeteVisual('port'); updateManeteVisual('stbd');
-  chronoReset();
-});
+}
+document.getElementById('btn-reset').addEventListener('click', resetControls);
+document.getElementById('btn-dock').addEventListener('click', () => { resetBoat(); resetControls(); chronoReset(); });
 
 // ══════════════════════════════════════════════════
 // VESSEL PROFILE — aplicação e troca
@@ -3253,13 +3253,7 @@ function applyVesselProfile(id) {
   //    posição/proa de partida próprias definidas em SCENARIOS.
   const scDock = SCENARIOS[currentScenarioId].dock;
   DOCK.x = scDock.x; DOCK.y = scDock.y; DOCK.heading = scDock.heading;
-  boat.x = DOCK.x; boat.y = DOCK.y; boat.heading = DOCK.heading;
-  boat.vx = 0; boat.vy = 0; boat.vr = 0;
-  wakePoints.length = 0;
-  state.surge = 0; state.sway = 0; state.yaw = 0;
-  joyHandle.style.transform = 'translate(-50%,-50%)';
-  manetePort = 0; maneteStbd = 0;
-  updateManeteVisual('port'); updateManeteVisual('stbd');
+  resetBoat(); resetControls();
   chronoReset();
 
   // 6) Reseta sliders de ganho para os defaults (35% / 25%)
@@ -3301,29 +3295,8 @@ document.querySelectorAll('.vessel-picker .cfg-toggle').forEach(btn => {
 // ══════════════════════════════════════════════════
 let controlMode = 'joystick';
 
-document.getElementById('tab-joystick').addEventListener('click', () => {
-  if (controlMode === 'joystick') return;
-  controlMode = 'joystick';
-  document.getElementById('tab-joystick').classList.add('active');
-  document.getElementById('tab-manetes').classList.remove('active');
-  document.getElementById('ctrl-joystick').style.display = '';
-  document.getElementById('ctrl-manetes').style.display = 'none';
-  document.getElementById('gamepad-wrap').style.display = '';
-  manetePort = 0; maneteStbd = 0;
-  updateManeteVisual('port'); updateManeteVisual('stbd');
-});
-
-document.getElementById('tab-manetes').addEventListener('click', () => {
-  if (controlMode === 'manetes') return;
-  controlMode = 'manetes';
-  document.getElementById('tab-manetes').classList.add('active');
-  document.getElementById('tab-joystick').classList.remove('active');
-  document.getElementById('ctrl-joystick').style.display = 'none';
-  document.getElementById('ctrl-manetes').style.display = '';
-  document.getElementById('gamepad-wrap').style.display = 'none';
-  state.surge = 0; state.sway = 0; state.yaw = 0;
-  joyHandle.style.transform = 'translate(-50%,-50%)';
-});
+document.getElementById('tab-joystick').addEventListener('click', () => switchToJoystick());
+document.getElementById('tab-manetes').addEventListener('click',  () => switchToManetes());
 
 // ══════════════════════════════════════════════════
 // MANETES
@@ -3338,8 +3311,10 @@ const MANETE_MAX_PX   = MANETE_TRACK_H / 2 - MANETE_HANDLE_H / 2 - 6;  // ~79 px
 
 // ── Zonas F-N-R ──
 // NEUTRAL: morto, caixa solta. ENGAGE: caixa em gear / motor em idle. Acima = throttle 0→100%.
+// Só para a manete ARRASTADA NA TELA. O hardware não passa por aqui: a manete
+// real já entrega gear + throttle prontos (ver hwApplyNav).
 const MANETE_NEUTRAL = 0.10;
-const MANETE_ENGAGE  = 0.25;   // ~15° a partir do neutro (conforme configuração física)
+const MANETE_ENGAGE  = 0.25;
 const MANETE_IDLE    = 0.07;   // empuxo de marcha lenta em gear
 
 function maneteToThrust(val) {
@@ -3454,18 +3429,25 @@ document.addEventListener('touchend', () => {
 let hwSocket     = null;
 let hwConnected  = false;
 let hwReconnTimer = null;
+let hwManualOff  = false;   // operador clicou "Desconectar": não reconecta sozinho
+let hwBackoff    = 1000;    // ms; 1 s → 5 s
+// Servido pelo adapter (http://127.0.0.1:8765/) → mesma origem. Aberto como
+// file:// → porta padrão do adapter. O campo de URL só sobrescreve se preenchido.
+function hwDefaultUrl() {
+  return location.protocol.startsWith('http') && location.host
+    ? `ws://${location.host}/stream` : 'ws://127.0.0.1:8765/stream';
+}
 let hwBow   = 0;   // thruster Bow  via PGN J1939 (type:thruster do can_adapter)
 let hwStern = 0;   // thruster Stern
 
-// Converte (gear, throttle) do ECUNavigate → val para maneteToThrust().
-// gear: 0=Neutral 1=Forward 2=Reverse  |  throttle: 0-100
-// Com gear engatado e thr=0, cai na zona ENGAJADO (marcha lenta).
-// Com thr>0, remapeia para a zona ACELERAÇÃO [MANETE_ENGAGE, 1.0].
-function hwGearThrToVal(gear, throttle) {
+// Empuxo vindo do hardware, por lado. null = hardware não comanda esse lado
+// (vale a manete da tela). gear 0=Neutral 1=Forward 2=Reverse, throttle 0-100:
+// neutro → 0; engatado com throttle 0 → marcha lenta; senão throttle direto.
+const hwThrust = { port: null, stbd: null };
+function hwGearThrToThrust(gear, throttle) {
   if (gear === 0) return 0;
   const sgn = gear === 2 ? -1 : 1;
-  if (throttle === 0) return sgn * (MANETE_NEUTRAL + MANETE_ENGAGE) / 2;
-  return sgn * (MANETE_ENGAGE + (throttle / 100) * (1 - MANETE_ENGAGE));
+  return sgn * (throttle === 0 ? MANETE_IDLE : throttle / 100);
 }
 
 function hwSetState(state, msg) {
@@ -3476,22 +3458,23 @@ function hwSetState(state, msg) {
   btn.textContent = state === 'connected' ? 'Desconectar' : 'Conectar';
   btn.className   = 'hw-btn' + (state === 'connected' ? ' connected' : '');
   txt.textContent = msg || state;
+  document.getElementById('hw-title').textContent = 'Hardware CAN · ' + (msg || state);
   hwConnected = state === 'connected';
 }
 
-// Quem está comandando no barramento (campo `by` dos eventos / `master` do
-// snapshot) → categoria de controle do ranking. Nomes do dicionário ADDR do
-// adaptador: Joystick=0x24, Manet1-3=CM300HD (postos CM01), CM06/CM06-1A=CM05.
-const HW_SOURCE_CTRL = {
-  'Joystick': 'cm04',
-  'Manet1': 'cm300hd', 'Manet2': 'cm300hd', 'Manet3': 'cm300hd',
-  'CM06': 'cm05', 'CM06-1A': 'cm05',
-};
+function hwScheduleReconnect() {
+  if (hwManualOff || hwReconnTimer) return;
+  hwReconnTimer = setTimeout(() => { hwReconnTimer = null; hwConnect(); }, hwBackoff);
+  hwBackoff = Math.min(hwBackoff * 2, 5000);
+}
+
+// Quem está comandando no barramento → categoria de controle do ranking.
+// O endereço (0x21-0x24) não diz o produto; o adapter deriva `ctrl` do byte 4
+// do CTRStatus (CM200/CM300 → cm300hd, CM06 → cm05) e manda junto com `by`.
 let hwActiveSource = null;
 
-function hwSetSource(by) {
-  const ctrl = HW_SOURCE_CTRL[by];
-  if (!ctrl || by === hwActiveSource) return;
+function hwSetSource(by, ctrl = 'cm300hd') {
+  if (!by || by === hwActiveSource) return;
   hwActiveSource = by;
   // Ranking passa a registrar na categoria do posto que está comandando
   if (ctrl !== selectedCtrlType) selectCtrl(ctrl);
@@ -3504,39 +3487,55 @@ function hwSetSource(by) {
 
 // Aplica um comando de propulsão vindo do hardware a uma ECU (Port/Starboard)
 function hwApplyNav(ecu, gear, throttle) {
-  const val = hwGearThrToVal(gear, throttle);
-  if (ecu === 'Port')      { manetePort = val; updateManeteVisual('port'); }
-  if (ecu === 'Starboard') { maneteStbd = val; updateManeteVisual('stbd'); }
+  const side = ecu === 'Port' ? 'port' : ecu === 'Starboard' ? 'stbd' : null;
+  if (!side) return;
+  hwThrust[side] = hwGearThrToThrust(gear, throttle);
+  // Posição do handle na tela é só feedback visual: engatado fica no detent,
+  // acelerando sobe proporcional ao throttle.
+  const sgn = gear === 2 ? -1 : 1;
+  const pos = gear === 0 ? 0
+            : throttle === 0 ? sgn * (MANETE_NEUTRAL + MANETE_ENGAGE) / 2
+            : sgn * (MANETE_ENGAGE + (throttle / 100) * (1 - MANETE_ENGAGE));
+  if (side === 'port') manetePort = pos; else maneteStbd = pos;
+  updateManeteVisual(side);
 }
 
 function hwConnect() {
   if (hwSocket) { hwSocket.close(); return; }
-  const url = document.getElementById('hw-url').value.trim();
+  const url = document.getElementById('hw-url').value.trim() || hwDefaultUrl();
   hwSetState('connecting', 'conectando…');
-  hwSocket = new WebSocket(url);
+  try { hwSocket = new WebSocket(url); }
+  catch (e) { hwSetState('', 'URL inválida'); return; }
 
-  hwSocket.onopen = () => hwSetState('connected', 'conectado');
+  hwSocket.onopen = () => { hwBackoff = 1000; hwSetState('connected', 'conectado'); };
 
   hwSocket.onmessage = (e) => {
     let msg;
     try { msg = JSON.parse(e.data); } catch { return; }
 
+    // Estado do barramento no adapter: canal aberto, procurando adaptador, queda
+    if (msg.type === 'status') {
+      if (msg.state === 'connected')    hwSetState('connected', 'CAN ' + (msg.channel || ''));
+      else if (msg.state === 'searching') hwSetState('connecting', 'procurando adaptador USB-CAN…');
+      else if (msg.state === 'reconnecting') hwSetState('connecting', 'CAN caiu, reconectando…');
+      return;
+    }
+
     // Eventos das ECUs emuladas
     if (msg.type === 'sim') {
       if (msg.event === 'navigate') {
-        // by = quem está comandando (Joystick / Manet1-3 / CM06)
-        hwSetSource(msg.by);
+        // gear/throttle já são o que a ECU emulada APLICA (0 enquanto o atuador anda)
+        hwSetSource(msg.by, msg.ctrl);
         hwApplyNav(msg.ecu, msg.gear, msg.throttle ?? 0);
-      } else if (msg.event === 'auto_engage' || msg.event === 'engage') {
-        hwSetSource(msg.by);
-      } else if (msg.event === 'watchdog_disengage') {
-        // Posto sumiu (1 s sem comando): ECU foi pra posição segura → zera o lado
+      } else if (msg.event === 'engage' && msg.ack === 1) {
+        hwSetSource(msg.by, msg.ctrl);
+      } else if (msg.event === 'ctr_status' && msg.commanding) {
+        hwSetSource(msg.by, msg.ctrl);
+      } else if (msg.event === 'watchdog_safe' || msg.event === 'watchdog_disengage') {
+        // 200 ms sem ECUN → neutro/0; 1 s → desengaja. Nos dois casos o lado para.
         hwApplyNav(msg.ecu, 0, 0);
-      } else if (msg.event === 'ctr_transfer_proxy') {
-        // Outro posto tomou o comando do joystick via MTCP
-        hwSetSource(msg.by);
       }
-      // navigate_ignored / thruster_ignored: comando recusado — nada a aplicar
+      // navigate_ignored: comando de quem não é o dono — nada a aplicar
       return;
     }
 
@@ -3569,8 +3568,10 @@ function hwConnect() {
   hwSocket.onclose = () => {
     hwSocket = null;
     hwActiveSource = null;
-    hwSetState('', 'desconectado');
+    hwSetState('', hwManualOff ? 'desconectado' : 'sem adapter, tentando…');
+    hwScheduleReconnect();
     manetePort = 0; maneteStbd = 0;
+    hwThrust.port = null; hwThrust.stbd = null;
     hwBow = 0; hwStern = 0;
     updateManeteVisual('port'); updateManeteVisual('stbd');
   };
@@ -3586,19 +3587,23 @@ document.getElementById('hw-header').addEventListener('click', () => {
 document.getElementById('hw-btn').addEventListener('click', (e) => {
   e.stopPropagation();
   if (hwConnected) {
+    hwManualOff = true;
     hwSocket?.close();
   } else {
+    hwManualOff = false;
+    clearTimeout(hwReconnTimer); hwReconnTimer = null; hwBackoff = 1000;
     hwConnect();
   }
 });
+hwConnect();   // liga sozinho ao abrir: sem passo manual no estande
 
-// Bloqueia drag enquanto hardware está conectado
-const _origManeteDown = window.__maneteDragDown;
+// Bloqueia drag das manetes só quando um posto físico já comandou
+// (hwActiveSource), não pelo simples fato do WebSocket estar aberto.
 document.addEventListener('mousedown', (e) => {
-  if (hwConnected && e.target.classList.contains('manete-handle')) e.stopImmediatePropagation();
+  if (hwActiveSource && e.target.classList.contains('manete-handle')) e.stopImmediatePropagation();
 }, true);
 document.addEventListener('touchstart', (e) => {
-  if (hwConnected && e.target.classList.contains('manete-handle')) e.stopImmediatePropagation();
+  if (hwActiveSource && e.target.classList.contains('manete-handle')) e.stopImmediatePropagation();
 }, { capture: true, passive: false });
 
 // ══════════════════════════════════════════════════
@@ -3856,13 +3861,26 @@ function filterByCategory(entries, cat) {
                           && e.gender     === cat.gender);
 }
 
+// Fonte de verdade quando servido pelo adapter: ranking.json no disco (sobrevive
+// a limpar o Chrome e a trocar file:// por http://). localStorage é o fallback.
+const SERVED = location.protocol.startsWith('http');
+let rankingCache = null;
 function loadRanking() {
-  try { return JSON.parse(localStorage.getItem(RANKING_KEY) || '[]'); }
-  catch { return []; }
+  if (rankingCache) return rankingCache;
+  try { rankingCache = JSON.parse(localStorage.getItem(RANKING_KEY) || '[]'); }
+  catch { rankingCache = []; }
+  return rankingCache;
 }
 function saveRanking(entries) {
-  localStorage.setItem(RANKING_KEY, JSON.stringify(entries));
+  rankingCache = entries;
+  try { localStorage.setItem(RANKING_KEY, JSON.stringify(entries)); } catch {}
+  if (SERVED) fetch('/ranking', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify(entries) }).catch(() => {});
 }
+if (SERVED) fetch('/ranking').then(r => r.json()).then(list => {
+  if (Array.isArray(list) && list.length) { rankingCache = list; refreshSideRanking(); }
+  else if (loadRanking().length) saveRanking(loadRanking());   // migra o que havia no browser
+}).catch(() => {});
 function addRankingEntry(name, ms) {
   const all = loadRanking();
   const cat = currentCategory();
@@ -3875,6 +3893,8 @@ function addRankingEntry(name, ms) {
   saveRanking(all.slice(0, 400));
   return filterByCategory(all, cat).slice(0, 10);
 }
+const escHtml = v => String(v).replace(/[&<>"']/g, c =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 function renderRankingEntries(container, entries, highlightMs) {
   entries.forEach((e, i) => {
     const div = document.createElement('div');
@@ -3882,7 +3902,7 @@ function renderRankingEntries(container, entries, highlightMs) {
     if (highlightMs !== undefined && e.ms === highlightMs && e.name === currentPlayer) div.classList.add('current');
     const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':(i+1)+'.';
     div.innerHTML = '<span class="ranking-pos">' + medal + '</span>'
-                  + '<span class="ranking-name">' + e.name + '</span>'
+                  + '<span class="ranking-name">' + escHtml(e.name) + '</span>'
                   + '<span class="ranking-time">' + fmtChrono(e.ms) + '</span>';
     container.appendChild(div);
   });
@@ -3965,15 +3985,7 @@ function hideStartModal() {
   }
 
   startModal.classList.add('hidden');
-  boat.x = DOCK.x; boat.y = DOCK.y; boat.heading = DOCK.heading;
-  boat.vx = 0; boat.vy = 0; boat.vr = 0;
-  wakePoints.length = 0;
-  state.surge = 0; state.sway = 0; state.yaw = 0;
-  bowBtn = 0; sternBtn = 0;
-  joyHandle.style.transform = 'translate(-50%,-50%)';
-  manetePort = 0; maneteStbd = 0;
-  updateManeteVisual('port'); updateManeteVisual('stbd');
-  document.querySelectorAll('.thr-btn').forEach(b => b.classList.remove('active'));
+  resetBoat(); resetControls();
   chronoReset();
   refreshSideRanking();
 }
@@ -4008,8 +4020,7 @@ function cancelManeuver() {
   document.getElementById('pause-overlay').classList.add('hidden');
   document.getElementById('modal-gameover').classList.add('hidden');
   finishModal.classList.add('hidden');
-  boat.x = DOCK.x; boat.y = DOCK.y; boat.heading = DOCK.heading;
-  boat.vx = 0; boat.vy = 0; boat.vr = 0;
+  resetBoat(); resetControls();
   chronoReset();               // também sai do pause e limpa gameOver
   playerNameInput.value = currentPlayer;
   showStartModal();
