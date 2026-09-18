@@ -45,7 +45,7 @@ joystick CM04) via CAN. Cronômetro, ranking por categoria, game over por colis�
 
 ## Contrato WebSocket (adapter → HTML)
 
-`status` (searching / connected / reconnecting) · `state` ~1 Hz com `master` e as ECUs (throttle já efetivo) · `sim` (engage com `ack`, navigate com gear/throttle **aplicados**, navigate_ignored, watchdog_safe aos 200 ms, watchdog_disengage a 1 s, ctr_status com `commanding`; todos com `by` e `ctrl`) · `thruster` (name Bow/Stern, direction 0 off / 1 BE / 2 BB, power, `active` com gate de master, `fault`, `by`; decodificado de DOIS contratos do joystick, J1939 0x18FF50xx/51xx e MTNet CTR Thruster 0x25 com off após 200 ms sem frame; apagar o que o firmware não usar) · `frame` cru.
+`status` (searching / connected / reconnecting) · `state` ~1 Hz com `master` e as ECUs (throttle já efetivo) · `sim` (engage com `ack`, navigate com gear/throttle **aplicados**, navigate_ignored, watchdog_safe aos 200 ms, watchdog_disengage a 1 s, ctr_status com `commanding`; todos com `by` e `ctrl`) · `thruster` (name Bow/Stern, direction 0 off / 1 BE / 2 BB, power, `active`, `by`, `ctrl`; traduzido do MTNet CTR Thruster cmd 0x25 do joystick, off após 200 ms sem frame) · `frame` cru.
 
 **Reiniciou o adapter com a manete ligada → re-engaje a manete** (neutro + botão de comando, ou desliga/liga): a ECU emulada sobe sem dono e, fiel ao firmware, ignora ECUN de quem não engajou. Nunca deixe dois adapters rodando: os dois publicam ECUStatus e o rpm na manete "pula".
 

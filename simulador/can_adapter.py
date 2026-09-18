@@ -65,14 +65,9 @@ ADDR = {0x00: "Unknown", 0x11: "Port", 0x12: "Starboard", 0x13: "TrollingValve",
 CMD = {0x02: "ECUStatus", 0x11: "ECUEngage", 0x12: "ECUNavigate", 0x13: "ValveControl",
        0x21: "ECUStarterState", 0x22: "ECUStarterRequest"}   # 0x21/0x22 vindos de CM = CTRStatus/CTRTransfer
 CM_ADDRS = range(0x21, 0x25)
-# Thrusters do joystick — DOIS contratos chegaram no mesmo dia (18/09/2026), o adapter aceita os dois:
-# (a) J1939 PDU2 proprietário, ID = (6<<26)|(0xFF<<16)|(PS<<8)|SA, PS 0x50 = Bow, 0x51 = Stern;
-#     data = [direction 0 Off/1 Stbd/2 Port, power 0-100, status b0 Active b1 Fault, 0xFF*5].
-#     Ver handoffs/joystick/can_protocol-joystick.md §6 (repo do joystick).
-# (b) MTNet CTR Thruster cmd 0x25, DLC 3 [id 1 proa / 2 popa][direção 0 off / 1 BE / 2 BB][potência],
-#     broadcast a 50 ms enquanto a estação comanda; sem frame por THRUSTER_TIMEOUT_S = off.
-#     Ver handoffs/HANDOFF-joystick-can.md §6. Quando o firmware fechar em um, apagar o outro.
-THRUSTER_PS = {0x50: "Bow", 0x51: "Stern"}
+# Thrusters do joystick: MTNet CTR Thruster cmd 0x25 (decisão do Gabriel, 18/09/2026), DLC 3
+# [id 1 proa / 2 popa][direção 0 off / 1 BE / 2 BB][potência 0-100], broadcast a 50 ms enquanto
+# a estação comanda; sem frame por THRUSTER_TIMEOUT_S = off. Ver handoffs/HANDOFF-joystick-can.md §6.
 THRUSTER_NAMES = {1: "Bow", 2: "Stern"}
 THRUSTER_TIMEOUT_S = 0.2
 PRIO_HIGH = 0b00011                          # Protocol::Priority.High (Apêndice A.3)
@@ -422,10 +417,7 @@ class CanManager:
         if not msg.is_extended_id:
             return
         _, rcv, snd, cmd = decode_id(msg.arbitration_id)
-        if rcv == 0xFF and snd in THRUSTER_PS and len(msg.data) >= 3:   # (a) J1939 thruster (PF 0xFF, PS 0x50/51, SA = cmd)
-            self._thruster(snd, cmd, msg.data)
-            return
-        if snd in CM_ADDRS and cmd == 0x25 and len(msg.data) == 3:   # (b) CTR Thruster 0x25
+        if snd in CM_ADDRS and cmd == 0x25 and len(msg.data) == 3:   # CTR Thruster (joystick)
             tid, direction, power = msg.data[0], msg.data[1], min(msg.data[2], 100)
             if tid in THRUSTER_NAMES and direction <= 2:
                 th = self.thrusters.setdefault(tid, {"direction": 0, "power": 0, "by": snd, "t": 0.0})
@@ -448,14 +440,6 @@ class CanManager:
                 self._engage(addr, st, snd, msg.data)
             elif cmd == 0x12:                    # ECUNavigate: comando de propulsão
                 self._navigate(addr, st, snd, msg.data)
-
-    def _thruster(self, ps, sa, data):
-        # Gate de master: se alguém comanda as ECUs e não é este SA, o thruster dele não vale.
-        master = self.ecu_state[0x11]["engaged_to"] or self.ecu_state[0x12]["engaged_to"]
-        active = bool(data[2] & 0x01) and data[0] in (1, 2) and data[1] > 0 and master in (None, sa)
-        self.broadcast({"type": "thruster", "name": THRUSTER_PS[ps], "direction": data[0],
-                        "power": min(data[1], 100), "active": active, "fault": bool(data[2] & 0x02),
-                        **self._by(sa)})
 
     def _engage(self, addr, st, sender, data):
         in_out = data[0] if data else 0
@@ -737,20 +721,6 @@ async def _selftest():
                               data=bytes([0x04, 0, 0, 0, 0b0010, 0x27]), is_extended_id=True))
     await asyncio.sleep(0.1)
     assert m.ctr_ctrl.get(head) == "cm300hd", m.ctr_ctrl
-
-    # thruster J1939 do joystick: bow 0x18FF50xx -> evento thruster; SA de outro posto com master = inativo
-    def thr_send(ps, sa, direction, power):
-        injector.send(can.Message(arbitration_id=(6 << 26) | (0xFF << 16) | (ps << 8) | sa,
-                                  data=bytes([direction, power, 1 if power else 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
-                                  is_extended_id=True))
-    while not q.empty():
-        q.get_nowait()
-    thr_send(0x50, head, 1, 80)
-    await asyncio.sleep(0.1)
-    ev = [q.get_nowait() for _ in range(q.qsize())]
-    th = [e for e in ev if e.get("type") == "thruster"]
-    assert th and th[-1]["name"] == "Bow" and th[-1]["direction"] == 1 and th[-1]["power"] == 80 \
-        and th[-1]["active"] and th[-1]["by"] == "Manet1", th
 
     # engate + troca de marcha: throttle 0 enquanto o atuador anda, depois vale
     head_send(0x11, bytes([0x31]))
