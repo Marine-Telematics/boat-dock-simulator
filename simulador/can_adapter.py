@@ -330,7 +330,12 @@ class CanManager:
                 self.state, self.detail = "connected", ""
                 self.broadcast({"type": "status", "state": "connected", "channel": self.channel})
                 while True:
-                    msg = await reader.get_message()
+                    rx = asyncio.ensure_future(reader.get_message())
+                    done, _ = await asyncio.wait({rx, tx}, return_when=asyncio.FIRST_COMPLETED)
+                    if tx in done:               # TX morreu = bus caiu → propaga e reconecta
+                        rx.cancel()
+                        raise tx.exception() or RuntimeError("ecu_status parou")
+                    msg = rx.result()
                     self._handle_rx(msg)
                     self.broadcast(frame_json(msg, "rx"))
             except asyncio.CancelledError:
@@ -380,10 +385,10 @@ class CanManager:
                 shown = st["rpm"] + st.get("jit", 0.0) * max(0.0, 1 - eff / 30)
                 payload = bytes([st["mode"] & 0xFF, g, min(eff, 100) & 0xFF,
                                  (int(shown) >> 8) & 0xFF, int(shown) & 0xFF, st["fail"] & 0xFF])
-                try:
-                    self.send_frame(mtnet_id(0, 0xFF, addr, 0x02), payload, ext=True)
-                except Exception:
-                    pass                         # best-effort; o _run trata a queda real
+                # Sem try: se o TX falha (USB caiu, bus-off) a tarefa morre e o _run,
+                # que observa esta tarefa, reconecta. O erro de RX do Notifier nunca
+                # chega ao _run (o asyncio só loga), então o TX é o detector de queda.
+                self.send_frame(mtnet_id(0, 0xFF, addr, 0x02), payload, ext=True)
             await asyncio.sleep(STATUS_S)
 
     # --- emulação das ECUs: reação aos comandos da manete (CM03 §7.1) ---
@@ -726,6 +731,19 @@ async def _selftest():
     await asyncio.sleep(ENGAGE_TIMEOUT_S)
     assert st["engaged_to"] is None, st
     assert isinstance(auto_candidates(), list)
+
+    # queda do bus por baixo (USB re-enumerado): TX falha -> reconnecting -> connected de novo
+    m.bus.shutdown()
+    for _ in range(100):
+        if m.state == "reconnecting":
+            break
+        await asyncio.sleep(0.05)
+    assert m.state == "reconnecting", m.state
+    for _ in range(100):
+        if m.state == "connected":
+            break
+        await asyncio.sleep(0.05)
+    assert m.state == "connected", m.state
 
     m.set_ecu("Starboard", {"rpm": 1500, "override": True})   # valor vindo de fora
     assert m.ecu_state[0x12]["rpm"] == 1500 and m.ecu_state[0x12]["override"] is True
