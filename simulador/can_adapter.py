@@ -14,6 +14,7 @@ a cada 2 s até achar um, reconecta se cair, e serve propulsion_scene.html em /.
 import asyncio
 import json
 import os
+import random
 import sys
 import time
 import webbrowser
@@ -32,7 +33,26 @@ STATUS_S = 0.04                            # ECUStatus a 25 Hz (CM03 doc §7.2)
 NAV_DEADLINE_S  = 0.20   # sem ECUN do dono por 200 ms -> neutro/0%, segue engajado
 ENGAGE_TIMEOUT_S = 1.0   # sem ECUN do dono por 1 s -> desengaja (nada é publicado)
 GEAR_TRAVEL_S   = 0.40   # atuador de marcha andando: gear|0x10 e throttle 0. Ajuste p/ sensação real.
-RPM_IDLE, RPM_MAX = 600, 3000   # rpm publicado no ECUStatus: linear no throttle efetivo. Ajuste p/ o motor exibido.
+# rpm publicado no ECUStatus (a manete mostra). Padrões abaixo; config.json ao lado sobrescreve
+# qualquer chave (ex.: {"RPM_MAX": 3500, "RPM_TAU_DOWN_S": 0.5}). Sem reiniciar não vale.
+RPM_IDLE, RPM_MAX = 600, 3500   # marcha lenta e rpm a 100 % de throttle
+RPM_TAU_S = 0.8          # rampa subindo (1ª ordem): ~63 % do degrau em TAU, ~95 % em 3·TAU. 0 = instantâneo.
+RPM_TAU_DOWN_S = 0.8     # idem descendo. Motor real cai mais rápido do que sobe: baixe este se quiser acentuar.
+RPM_CURVE = 1.6          # alvo = idle + (max-idle)·(thr/100)^CURVE. >1: ganha pouco no início do curso, muito no fim. 1 = linear.
+RPM_IDLE_JITTER = 10     # ± rpm de oscilação na marcha lenta (passeio aleatório lento). Some até 30 % de throttle. 0 = desliga.
+RPM_IDLE_JITTER_STEP = 0.05   # passo do passeio por frame (25 Hz), fração da amplitude. Maior = oscila mais rápido.
+CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+if os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE) as _f:
+        _cfg = json.load(_f)
+    for _k in ("RPM_IDLE", "RPM_MAX", "RPM_TAU_S", "RPM_TAU_DOWN_S", "RPM_CURVE",
+               "RPM_IDLE_JITTER", "RPM_IDLE_JITTER_STEP", "GEAR_TRAVEL_S"):
+        if _k in _cfg:
+            globals()[_k] = float(_cfg[_k])
+
+
+def rpm_target(thr):
+    return RPM_IDLE + (RPM_MAX - RPM_IDLE) * (thr / 100) ** RPM_CURVE
 # Byte 4 do CTRStatus (product_bitstr) -> categoria de controle do ranking do simulador
 CTR_PRODUCT = {0b0000: "cm300hd", 0b0010: "cm300hd", 0b1000: "cm05"}   # CM200, CM300, CM06
 
@@ -349,10 +369,17 @@ class CanManager:
                                     **self._by(st["engaged_to"] or 0), **self._effective(st)})
                 g = (st["gear"] & 0x0F) | (0x10 if st["moving"] else 0)
                 eff = 0 if st["moving"] else st["throttle"]
-                if not st["override"]:           # rpm segue o throttle (a manete mostra isso)
-                    st["rpm"] = RPM_IDLE + (RPM_MAX - RPM_IDLE) * eff // 100
+                if not st["override"]:           # rpm segue o throttle com rampa (a manete mostra isso)
+                    target = rpm_target(eff)
+                    tau = RPM_TAU_S if target > st["rpm"] else RPM_TAU_DOWN_S
+                    k = 1.0 if tau <= 0 else min(1.0, STATUS_S / tau)
+                    st["rpm"] += (target - st["rpm"]) * k     # float: int só no frame, senão trava a 1 passo do alvo
+                    # lenta "respirando": passeio aleatório limitado a ±JITTER, pesa 1 na lenta e 0 a partir de 30 %
+                    step = RPM_IDLE_JITTER * RPM_IDLE_JITTER_STEP
+                    st["jit"] = max(-RPM_IDLE_JITTER, min(RPM_IDLE_JITTER, st.get("jit", 0.0) + random.uniform(-step, step)))
+                shown = st["rpm"] + st.get("jit", 0.0) * max(0.0, 1 - eff / 30)
                 payload = bytes([st["mode"] & 0xFF, g, min(eff, 100) & 0xFF,
-                                 (st["rpm"] >> 8) & 0xFF, st["rpm"] & 0xFF, st["fail"] & 0xFF])
+                                 (int(shown) >> 8) & 0xFF, int(shown) & 0xFF, st["fail"] & 0xFF])
                 try:
                     self.send_frame(mtnet_id(0, 0xFF, addr, 0x02), payload, ext=True)
                 except Exception:
@@ -421,15 +448,15 @@ class CanManager:
         st["last_cmd"] = now                     # alimenta os dois watchdogs
         if st["override"]:
             return
+        changed = gear != st["gear"] or thr != st["throttle"]
         if gear != st["gear"]:                   # troca de marcha: atuador anda, throttle 0 até chegar
             st["gear"] = gear
             if gear:
                 st["moving"], st["move_until"] = True, now + GEAR_TRAVEL_S
             else:
                 st["moving"] = False
-        changed = st["throttle"] != thr
         st["throttle"] = thr
-        if changed or st["moving"] is False and gear == 0:
+        if changed:
             self.broadcast({"type": "sim", "ecu": ADDR[addr], "event": "navigate",
                             **self._by(sender), **self._effective(st)})
 
@@ -679,10 +706,19 @@ async def _selftest():
         head_send(0x12, bytes([0, 2, 30]))
         await asyncio.sleep(0.03)
     assert not st["moving"] and m._effective(st)["throttle"] == 30, st
-    assert st["rpm"] == RPM_IDLE + (RPM_MAX - RPM_IDLE) * 30 // 100, st["rpm"]
+    target = rpm_target(30)
+    assert RPM_IDLE < st["rpm"] < target, st["rpm"]            # subindo, ainda na rampa
+    for _ in range(int(4 * RPM_TAU_S / 0.03) + 1):
+        head_send(0x12, bytes([0, 2, 30]))
+        await asyncio.sleep(0.03)
+    assert abs(st["rpm"] - target) <= 25, (st["rpm"], target)    # assentou (≈98 % em 4·TAU)
     ev = [q.get_nowait() for _ in range(q.qsize())]
     navs = [e for e in ev if e.get("event") == "navigate"]
     assert navs and navs[-1]["throttle"] == 30 and navs[-1]["ctrl"] == "cm300hd", navs
+    for _ in range(int(8 * RPM_TAU_DOWN_S / 0.03)):              # neutro com keepalive: rpm volta a 600, não trava em 610
+        head_send(0x12, bytes([0, 0, 0]))
+        await asyncio.sleep(0.03)
+    assert int(st["rpm"]) == RPM_IDLE, st["rpm"]
 
     # 200 ms sem ECUN -> neutro/0 mas segue engajado; 1 s -> desengaja
     await asyncio.sleep(NAV_DEADLINE_S + 0.1)

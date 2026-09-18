@@ -1,0 +1,10 @@
+{
+  "RPM_IDLE": 600,
+  "RPM_MAX": 3500,
+  "RPM_TAU_S": 0.8,
+  "RPM_TAU_DOWN_S": 0.8,
+  "RPM_CURVE": 1.6,
+  "RPM_IDLE_JITTER": 10,
+  "RPM_IDLE_JITTER_STEP": 0.05,
+  "GEAR_TRAVEL_S": 0.4
+}

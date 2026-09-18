@@ -16,6 +16,7 @@ joystick CM04) via CAN. Cronômetro, ranking por categoria, game over por colis�
 | `propulsion_scene.html` | **O simulador.** Um arquivo só (~4000 linhas): CSS, SVG dos 3 cascos e dos 3 cenários, e o JS. |
 | `can_adapter.py` | Ponte CAN ↔ WebSocket (python-can + aiohttp). Serve o HTML em `/`, acha o USB-CAN sozinho, emula as ECUs CM03, persiste o ranking. |
 | `simulador.command` / `simulador.sh` | Launcher (Mac / Linux): venv na 1ª vez, sobe o adapter, que abre o browser. |
+| `config.json` | Sensação do motor emulado: rpm de lenta/máximo, rampa (subida/descida), curva, oscilação na lenta, tempo do atuador de marcha. Lido na subida do adapter; chaves omitidas usam o padrão do código. |
 | `requirements.txt` | Deps do adapter. gs_usb/pyusb só no Mac. |
 | `propulsion_validator.html` | Visualizador estático da lógica de zonas do joystick, sem física. |
 | `iate_top_view.svg` | Ícone original do iate. Não editado. |
@@ -45,6 +46,8 @@ joystick CM04) via CAN. Cronômetro, ranking por categoria, game over por colis�
 ## Contrato WebSocket (adapter → HTML)
 
 `status` (searching / connected / reconnecting) · `state` ~1 Hz com `master` e as ECUs (throttle já efetivo) · `sim` (engage com `ack`, navigate com gear/throttle **aplicados**, navigate_ignored, watchdog_safe aos 200 ms, watchdog_disengage a 1 s, ctr_status com `commanding`; todos com `by` e `ctrl`) · `frame` cru. Eventos `thruster` **não** são emitidos.
+
+**Reiniciou o adapter com a manete ligada → re-engaje a manete** (neutro + botão de comando, ou desliga/liga): a ECU emulada sobe sem dono e, fiel ao firmware, ignora ECUN de quem não engajou. Nunca deixe dois adapters rodando: os dois publicam ECUStatus e o rpm na manete "pula".
 
 A emulação da ECU segue o firmware V1 v2.5.0 (fonte: sessão do repo CM03): ECUN de sender não engajado é ignorado em silêncio, sem auto-engage; troca de marcha segura throttle 0 por `GEAR_TRAVEL_S`; mode do ECUN é ignorado (a manete já escala Dock a 20 % antes de mandar). A manete CM300HD 2.7.0 manda ECUN a 20 ms só para ECU que publicou ECUStatus nos últimos 500 ms: **sem ECUS emulado a manete fica muda**. O adapter nunca transmite com origem 0x21–0x24 (a manete detectaria colisão e pararia).
 
