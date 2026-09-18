@@ -65,6 +65,10 @@ ADDR = {0x00: "Unknown", 0x11: "Port", 0x12: "Starboard", 0x13: "TrollingValve",
 CMD = {0x02: "ECUStatus", 0x11: "ECUEngage", 0x12: "ECUNavigate", 0x13: "ValveControl",
        0x21: "ECUStarterState", 0x22: "ECUStarterRequest"}   # 0x21/0x22 vindos de CM = CTRStatus/CTRTransfer
 CM_ADDRS = range(0x21, 0x25)
+# Thrusters do joystick: J1939 PDU2 proprietário, ID = (6<<26)|(0xFF<<16)|(PS<<8)|SA,
+# PS 0x50 = Bow, 0x51 = Stern; data = [direction 0 Off/1 Stbd/2 Port, power 0-100, status b0 Active b1 Fault, 0xFF*5].
+# Ver handoffs/joystick/can_protocol-joystick.md §6.
+THRUSTER_PS = {0x50: "Bow", 0x51: "Stern"}
 PRIO_HIGH = 0b00011                          # Protocol::Priority.High (Apêndice A.3)
 
 
@@ -401,6 +405,9 @@ class CanManager:
         if not msg.is_extended_id:
             return
         _, rcv, snd, cmd = decode_id(msg.arbitration_id)
+        if rcv == 0xFF and snd in THRUSTER_PS and len(msg.data) >= 3:   # J1939 thruster (PF 0xFF, PS 0x50/51, SA = cmd)
+            self._thruster(snd, cmd, msg.data)
+            return
         if snd in CM_ADDRS and cmd == 0x21 and len(msg.data) >= 5:   # CTRStatus: quem é o produto e se comanda
             ctrl = CTR_PRODUCT.get(msg.data[4] & 0x0F, "cm300hd")
             if self.ctr_ctrl.get(snd) != ctrl:
@@ -415,6 +422,14 @@ class CanManager:
                 self._engage(addr, st, snd, msg.data)
             elif cmd == 0x12:                    # ECUNavigate: comando de propulsão
                 self._navigate(addr, st, snd, msg.data)
+
+    def _thruster(self, ps, sa, data):
+        # Gate de master: se alguém comanda as ECUs e não é este SA, o thruster dele não vale.
+        master = self.ecu_state[0x11]["engaged_to"] or self.ecu_state[0x12]["engaged_to"]
+        active = bool(data[2] & 0x01) and data[0] in (1, 2) and data[1] > 0 and master in (None, sa)
+        self.broadcast({"type": "thruster", "name": THRUSTER_PS[ps], "direction": data[0],
+                        "power": min(data[1], 100), "active": active, "fault": bool(data[2] & 0x02),
+                        **self._by(sa)})
 
     def _engage(self, addr, st, sender, data):
         in_out = data[0] if data else 0
@@ -696,6 +711,20 @@ async def _selftest():
                               data=bytes([0x04, 0, 0, 0, 0b0010, 0x27]), is_extended_id=True))
     await asyncio.sleep(0.1)
     assert m.ctr_ctrl.get(head) == "cm300hd", m.ctr_ctrl
+
+    # thruster J1939 do joystick: bow 0x18FF50xx -> evento thruster; SA de outro posto com master = inativo
+    def thr_send(ps, sa, direction, power):
+        injector.send(can.Message(arbitration_id=(6 << 26) | (0xFF << 16) | (ps << 8) | sa,
+                                  data=bytes([direction, power, 1 if power else 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
+                                  is_extended_id=True))
+    while not q.empty():
+        q.get_nowait()
+    thr_send(0x50, head, 1, 80)
+    await asyncio.sleep(0.1)
+    ev = [q.get_nowait() for _ in range(q.qsize())]
+    th = [e for e in ev if e.get("type") == "thruster"]
+    assert th and th[-1]["name"] == "Bow" and th[-1]["direction"] == 1 and th[-1]["power"] == 80 \
+        and th[-1]["active"] and th[-1]["by"] == "Manet1", th
 
     # engate + troca de marcha: throttle 0 enquanto o atuador anda, depois vale
     head_send(0x11, bytes([0x31]))
