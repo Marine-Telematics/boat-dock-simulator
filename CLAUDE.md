@@ -27,9 +27,11 @@ vive FORA deste workspace, em `~/CM2008`.
 Só três coisas — tudo o mais é ignorado:
 
 - `handoffs/` — contratos entre produtos (ver abaixo).
-- `simulador/` — simulador de propulsão em HTML puro. Tem CLAUDE.md próprio
-  com a arquitetura; sem build, abre o `.html` no browser
-  (ou `python3 -m http.server` para evitar restrições de `file://`).
+- `simulador/` — simulador de atracação para boatshow: `propulsion_scene.html`
+  (um arquivo só) + `can_adapter.py` (ponte CAN↔WebSocket, serve o HTML e emula
+  as ECUs). Tem CLAUDE.md próprio com a arquitetura. Rodar: `./simulador.sh`
+  (Linux) ou `simulador.command` (Mac) → `http://127.0.0.1:8765/`; sem hardware,
+  abrir o `.html` direto. Único teste: `python3 can_adapter.py --selftest`.
 - `tools/` — CLI e piloto do kanban MaTelQMS (ver abaixo).
 
 `README.md` na raiz é o guia de uso dos logos da marca (cores, área de

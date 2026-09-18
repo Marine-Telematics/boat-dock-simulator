@@ -32,6 +32,7 @@ STATUS_S = 0.04                            # ECUStatus a 25 Hz (CM03 doc §7.2)
 NAV_DEADLINE_S  = 0.20   # sem ECUN do dono por 200 ms -> neutro/0%, segue engajado
 ENGAGE_TIMEOUT_S = 1.0   # sem ECUN do dono por 1 s -> desengaja (nada é publicado)
 GEAR_TRAVEL_S   = 0.40   # atuador de marcha andando: gear|0x10 e throttle 0. Ajuste p/ sensação real.
+RPM_IDLE, RPM_MAX = 600, 3000   # rpm publicado no ECUStatus: linear no throttle efetivo. Ajuste p/ o motor exibido.
 # Byte 4 do CTRStatus (product_bitstr) -> categoria de controle do ranking do simulador
 CTR_PRODUCT = {0b0000: "cm300hd", 0b0010: "cm300hd", 0b1000: "cm05"}   # CM200, CM300, CM06
 
@@ -348,6 +349,8 @@ class CanManager:
                                     **self._by(st["engaged_to"] or 0), **self._effective(st)})
                 g = (st["gear"] & 0x0F) | (0x10 if st["moving"] else 0)
                 eff = 0 if st["moving"] else st["throttle"]
+                if not st["override"]:           # rpm segue o throttle (a manete mostra isso)
+                    st["rpm"] = RPM_IDLE + (RPM_MAX - RPM_IDLE) * eff // 100
                 payload = bytes([st["mode"] & 0xFF, g, min(eff, 100) & 0xFF,
                                  (st["rpm"] >> 8) & 0xFF, st["rpm"] & 0xFF, st["fail"] & 0xFF])
                 try:
@@ -676,6 +679,7 @@ async def _selftest():
         head_send(0x12, bytes([0, 2, 30]))
         await asyncio.sleep(0.03)
     assert not st["moving"] and m._effective(st)["throttle"] == 30, st
+    assert st["rpm"] == RPM_IDLE + (RPM_MAX - RPM_IDLE) * 30 // 100, st["rpm"]
     ev = [q.get_nowait() for _ in range(q.qsize())]
     navs = [e for e in ev if e.get("event") == "navigate"]
     assert navs and navs[-1]["throttle"] == 30 and navs[-1]["ctrl"] == "cm300hd", navs
