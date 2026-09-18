@@ -45,7 +45,11 @@ joystick CM04) via CAN. Cronômetro, ranking por categoria, game over por colis�
 
 ## Contrato WebSocket (adapter → HTML)
 
+<<<<<<< HEAD
 `status` (searching / connected / reconnecting) · `state` ~1 Hz com `master` e as ECUs (throttle já efetivo) · `sim` (engage com `ack`, navigate com gear/throttle **aplicados**, navigate_ignored, watchdog_safe aos 200 ms, watchdog_disengage a 1 s, ctr_status com `commanding`; todos com `by` e `ctrl`) · `thruster` (J1939 0x18FF50xx/51xx do joystick: `name` Bow/Stern, `direction` 0/1 Stbd/2 Port, `power`, `active` já com gate de master, `fault`, `by`) · `frame` cru.
+=======
+`status` (searching / connected / reconnecting) · `state` ~1 Hz com `master` e as ECUs (throttle já efetivo) · `sim` (engage com `ack`, navigate com gear/throttle **aplicados**, navigate_ignored, watchdog_safe aos 200 ms, watchdog_disengage a 1 s, ctr_status com `commanding`; todos com `by` e `ctrl`) · `thruster` (name Bow/Stern, direction 0 off / 1 BE / 2 BB, power; traduzido do CTR Thruster cmd 0x25 do joystick, off após 200 ms sem frame) · `frame` cru.
+>>>>>>> bd0ee94 (feat(simulador): thruster do joystick via CTR Thruster 0x25 — e o handoff do joystick)
 
 **Reiniciou o adapter com a manete ligada → re-engaje a manete** (neutro + botão de comando, ou desliga/liga): a ECU emulada sobe sem dono e, fiel ao firmware, ignora ECUN de quem não engajou. Nunca deixe dois adapters rodando: os dois publicam ECUStatus e o rpm na manete "pula".
 

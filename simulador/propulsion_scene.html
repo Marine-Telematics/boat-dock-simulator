@@ -3547,7 +3547,7 @@ function hwConnect() {
       const val = msg.direction === 1 ? pwr : msg.direction === 2 ? -pwr : 0;
       if (msg.name === 'Bow')   hwBow   = val;
       if (msg.name === 'Stern') hwStern = val;
-      if (val !== 0) hwSetSource(msg.by);
+      if (val !== 0) hwSetSource(msg.by, msg.ctrl);
       return;
     }
 

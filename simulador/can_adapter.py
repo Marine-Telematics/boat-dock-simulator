@@ -65,10 +65,16 @@ ADDR = {0x00: "Unknown", 0x11: "Port", 0x12: "Starboard", 0x13: "TrollingValve",
 CMD = {0x02: "ECUStatus", 0x11: "ECUEngage", 0x12: "ECUNavigate", 0x13: "ValveControl",
        0x21: "ECUStarterState", 0x22: "ECUStarterRequest"}   # 0x21/0x22 vindos de CM = CTRStatus/CTRTransfer
 CM_ADDRS = range(0x21, 0x25)
-# Thrusters do joystick: J1939 PDU2 proprietário, ID = (6<<26)|(0xFF<<16)|(PS<<8)|SA,
-# PS 0x50 = Bow, 0x51 = Stern; data = [direction 0 Off/1 Stbd/2 Port, power 0-100, status b0 Active b1 Fault, 0xFF*5].
-# Ver handoffs/joystick/can_protocol-joystick.md §6.
+# Thrusters do joystick — DOIS contratos chegaram no mesmo dia (18/09/2026), o adapter aceita os dois:
+# (a) J1939 PDU2 proprietário, ID = (6<<26)|(0xFF<<16)|(PS<<8)|SA, PS 0x50 = Bow, 0x51 = Stern;
+#     data = [direction 0 Off/1 Stbd/2 Port, power 0-100, status b0 Active b1 Fault, 0xFF*5].
+#     Ver handoffs/joystick/can_protocol-joystick.md §6 (repo do joystick).
+# (b) MTNet CTR Thruster cmd 0x25, DLC 3 [id 1 proa / 2 popa][direção 0 off / 1 BE / 2 BB][potência],
+#     broadcast a 50 ms enquanto a estação comanda; sem frame por THRUSTER_TIMEOUT_S = off.
+#     Ver handoffs/HANDOFF-joystick-can.md §6. Quando o firmware fechar em um, apagar o outro.
 THRUSTER_PS = {0x50: "Bow", 0x51: "Stern"}
+THRUSTER_NAMES = {1: "Bow", 2: "Stern"}
+THRUSTER_TIMEOUT_S = 0.2
 PRIO_HIGH = 0b00011                          # Protocol::Priority.High (Apêndice A.3)
 
 
@@ -233,6 +239,7 @@ class CanManager:
                               "engaged_to": None, "last_cmd": 0.0,
                               "override": False} for a in ECUS}
         self.ctr_ctrl = {}                # sender CM -> categoria (byte 4 do CTRStatus)
+        self.thrusters = {}               # id -> {"direction", "power", "by", "t"}
         self._task = None
         self._lock = asyncio.Lock()
         self.auto = True                  # False quando alguém escolheu canal pela UI/URL
@@ -245,6 +252,12 @@ class CanManager:
     def _by(self, sender):
         return {"by": ADDR.get(sender, hex(sender)),
                 "ctrl": self.ctr_ctrl.get(sender, "cm300hd")}
+
+    def _emit_thruster(self, tid, th):
+        # Mesmo formato que o HTML já trata: name Bow/Stern, direction 0 off / 1 BE / 2 BB, power 0-100
+        self.broadcast({"type": "thruster", "name": THRUSTER_NAMES[tid], "direction": th["direction"],
+                        "power": th["power"], "active": th["power"] > 0, "fault": False,
+                        **self._by(th["by"])})
 
     def _effective(self, st):
         # O que a ECU realmente aplica: throttle 0 enquanto o atuador de marcha anda
@@ -362,6 +375,10 @@ class CanManager:
         """Emula as 2 ECUs: watchdog de engate (1 s) + ECUStatus@25Hz (CM03 §7.1-7.2)."""
         while True:
             now = time.monotonic()
+            for tid, th in list(self.thrusters.items()):     # thruster sem frame -> off
+                if th["power"] and now - th["t"] > THRUSTER_TIMEOUT_S:
+                    th["direction"], th["power"] = 0, 0
+                    self._emit_thruster(tid, th)
             for addr, st in self.ecu_state.items():
                 if st["engaged_to"] is not None and not st["override"]:
                     idle = now - st["last_cmd"]
@@ -405,8 +422,17 @@ class CanManager:
         if not msg.is_extended_id:
             return
         _, rcv, snd, cmd = decode_id(msg.arbitration_id)
-        if rcv == 0xFF and snd in THRUSTER_PS and len(msg.data) >= 3:   # J1939 thruster (PF 0xFF, PS 0x50/51, SA = cmd)
+        if rcv == 0xFF and snd in THRUSTER_PS and len(msg.data) >= 3:   # (a) J1939 thruster (PF 0xFF, PS 0x50/51, SA = cmd)
             self._thruster(snd, cmd, msg.data)
+            return
+        if snd in CM_ADDRS and cmd == 0x25 and len(msg.data) == 3:   # (b) CTR Thruster 0x25
+            tid, direction, power = msg.data[0], msg.data[1], min(msg.data[2], 100)
+            if tid in THRUSTER_NAMES and direction <= 2:
+                th = self.thrusters.setdefault(tid, {"direction": 0, "power": 0, "by": snd, "t": 0.0})
+                changed = (th["direction"], th["power"]) != (direction, power)
+                th.update(direction=direction, power=power, by=snd, t=time.monotonic())
+                if changed:
+                    self._emit_thruster(tid, th)
             return
         if snd in CM_ADDRS and cmd == 0x21 and len(msg.data) >= 5:   # CTRStatus: quem é o produto e se comanda
             ctrl = CTR_PRODUCT.get(msg.data[4] & 0x0F, "cm300hd")
@@ -753,6 +779,18 @@ async def _selftest():
         head_send(0x12, bytes([0, 0, 0]))
         await asyncio.sleep(0.03)
     assert int(st["rpm"]) == RPM_IDLE, st["rpm"]
+
+    # CTR Thruster 0x25: proa BE 60 % -> evento; 200 ms sem frame -> off
+    while not q.empty():
+        q.get_nowait()
+    injector.send(can.Message(arbitration_id=mtnet_id(0x07, 0xFF, head, 0x25),
+                              data=bytes([1, 1, 60]), is_extended_id=True))
+    await asyncio.sleep(0.1)
+    ths = [e for e in [q.get_nowait() for _ in range(q.qsize())] if e.get("type") == "thruster"]
+    assert ths and ths[-1]["name"] == "Bow" and ths[-1]["direction"] == 1 and ths[-1]["power"] == 60, ths
+    await asyncio.sleep(THRUSTER_TIMEOUT_S + 0.1)
+    ths = [e for e in [q.get_nowait() for _ in range(q.qsize())] if e.get("type") == "thruster"]
+    assert ths and ths[-1]["power"] == 0 and ths[-1]["active"] is False, ths
 
     # 200 ms sem ECUN -> neutro/0 mas segue engajado; 1 s -> desengaja
     await asyncio.sleep(NAV_DEADLINE_S + 0.1)
