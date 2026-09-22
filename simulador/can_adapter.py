@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import random
+import struct
 import sys
 import time
 import webbrowser
@@ -71,6 +72,13 @@ CM_ADDRS = range(0x21, 0x25)
 THRUSTER_NAMES = {1: "Bow", 2: "Stern"}
 THRUSTER_TIMEOUT_S = 0.2
 PRIO_HIGH = 0b00011                          # Protocol::Priority.High (Apêndice A.3)
+# Modo "eixos" do joystick (firmware confirmou em 22/09/2026, ver
+# handoffs/HANDOFF-joystick-can-alinhado.md): CTR Joystick Axes cmd 0x26,
+# broadcast a 50 ms, DLC 8 [X lo][X hi][Y lo][Y hi][Z lo][Z hi][btn][0], int16
+# little-endian -480..480. CTR Joystick Config cmd 0x27, receiver=0x24
+# (o joystick), DLC 0 consulta / DLC 1 [modo] configura; sender do adapter 0xFE.
+JOYSTICK_ADDR = 0x24
+JOYSTICK_AXIS_RANGE = 480
 
 
 def mtnet_id(prio, receiver, sender, command):
@@ -235,6 +243,7 @@ class CanManager:
                               "override": False} for a in ECUS}
         self.ctr_ctrl = {}                # sender CM -> categoria (byte 4 do CTRStatus)
         self.thrusters = {}               # id -> {"direction", "power", "by", "t"}
+        self.joystick_axes = {}           # sender CM -> {"x","y","z","btn","t"} (CTR Joystick Axes 0x26)
         self._task = None
         self._lock = asyncio.Lock()
         self.auto = True                  # False quando alguém escolheu canal pela UI/URL
@@ -253,6 +262,11 @@ class CanManager:
         self.broadcast({"type": "thruster", "name": THRUSTER_NAMES[tid], "direction": th["direction"],
                         "power": th["power"], "active": th["power"] > 0, "fault": False,
                         **self._by(th["by"])})
+
+    def _emit_joystick(self, snd, jst):
+        # Só o joystick (CM04) manda 0x26 -> ctrl fixo, sem passar pelo CTR_PRODUCT do CTRStatus
+        self.broadcast({"type": "joystick", "x": jst["x"], "y": jst["y"], "z": jst["z"],
+                        "btn": jst["btn"], **self._by(snd), "ctrl": "cm04"})
 
     def _effective(self, st):
         # O que a ECU realmente aplica: throttle 0 enquanto o atuador de marcha anda
@@ -374,6 +388,10 @@ class CanManager:
                 if th["power"] and now - th["t"] > THRUSTER_TIMEOUT_S:
                     th["direction"], th["power"] = 0, 0
                     self._emit_thruster(tid, th)
+            for snd, jst in list(self.joystick_axes.items()):   # joystick sem frame -> zera
+                if (jst["x"] or jst["y"] or jst["z"] or jst["btn"]) and now - jst["t"] > THRUSTER_TIMEOUT_S:
+                    jst.update(x=0.0, y=0.0, z=0.0, btn=0)
+                    self._emit_joystick(snd, jst)
             for addr, st in self.ecu_state.items():
                 if st["engaged_to"] is not None and not st["override"]:
                     idle = now - st["last_cmd"]
@@ -417,6 +435,20 @@ class CanManager:
         if not msg.is_extended_id:
             return
         _, rcv, snd, cmd = decode_id(msg.arbitration_id)
+        if snd in CM_ADDRS and cmd == 0x26 and len(msg.data) == 8:   # CTR Joystick Axes (modo eixos)
+            x, y, z = struct.unpack('<hhh', msg.data[:6])
+            btn = msg.data[6]
+            jx, jy, jz = (max(-1.0, min(1.0, v / JOYSTICK_AXIS_RANGE)) for v in (x, y, z))
+            jst = self.joystick_axes.setdefault(snd, {"x": 0.0, "y": 0.0, "z": 0.0, "btn": 0, "t": 0.0})
+            changed = (jst["x"], jst["y"], jst["z"], jst["btn"]) != (jx, jy, jz, btn)
+            jst.update(x=jx, y=jy, z=jz, btn=btn, t=time.monotonic())
+            if changed:
+                self._emit_joystick(snd, jst)
+            return
+        if snd == JOYSTICK_ADDR and cmd == 0x27 and rcv == 0xFF and len(msg.data) == 1:
+            # Resposta do joystick ao CTR Joystick Config (consulta ou troca de modo)
+            self.broadcast({"type": "sim", "event": "joystick_mode", "mode": msg.data[0], **self._by(snd)})
+            return
         if snd in CM_ADDRS and cmd == 0x25 and len(msg.data) == 3:   # CTR Thruster (joystick)
             tid, direction, power = msg.data[0], msg.data[1], min(msg.data[2], 100)
             if tid in THRUSTER_NAMES and direction <= 2:
@@ -524,6 +556,22 @@ async def ranking_post(request):
     return web.json_response({"ok": True, "n": len(data)})
 
 
+async def joystick_mode_get(_):
+    """Consulta o modo atual do joystick: manda CTR Joystick Config (0x27) DLC 0."""
+    manager.send_frame(mtnet_id(0x07, JOYSTICK_ADDR, 0xFE, 0x27), b"", ext=True)
+    return web.Response(status=204)
+
+
+async def joystick_mode_post(request):
+    """Configura o modo do joystick: 0 direto / 1 eixos. CTR Joystick Config (0x27) DLC 1."""
+    data = await request.json()
+    mode = data.get("mode")
+    if mode not in (0, 1):
+        return web.json_response({"error": "mode deve ser 0 ou 1"}, status=400)
+    manager.send_frame(mtnet_id(0x07, JOYSTICK_ADDR, 0xFE, 0x27), bytes([mode]), ext=True)
+    return web.Response(status=204)
+
+
 async def on_startup(app):
     app["auto"] = asyncio.create_task(manager.auto_loop())
     app["snap"] = asyncio.create_task(manager.snapshot_loop())
@@ -611,6 +659,8 @@ def make_app():
         web.route("*", "/connect", connect),            # conectar/trocar canal (GET ou POST)
         web.get("/state", state),                       # estado do canal atual
         web.post("/ecu", set_ecu),                       # sobrescrever valores de uma ECU
+        web.get("/joystick/mode", joystick_mode_get),    # consulta o modo do joystick (0x27 DLC 0)
+        web.post("/joystick/mode", joystick_mode_post),  # troca o modo do joystick (0x27 DLC 1)
         web.get("/stream", stream),                     # push WS + comandos
     ])
     app.on_startup.append(on_startup)
@@ -721,6 +771,33 @@ async def _selftest():
                               data=bytes([0x04, 0, 0, 0, 0b0010, 0x27]), is_extended_id=True))
     await asyncio.sleep(0.1)
     assert m.ctr_ctrl.get(head) == "cm300hd", m.ctr_ctrl
+
+    # CTR Joystick Axes 0x26 (modo eixos): X=240,Y=-480,Z=0,btn=1 -> evento joystick, ctrl cm04
+    while not q.empty():
+        q.get_nowait()
+    injector.send(can.Message(arbitration_id=mtnet_id(0x07, 0xFF, 0x24, 0x26),
+                              data=struct.pack('<hhhBB', 240, -480, 0, 1, 0), is_extended_id=True))
+    await asyncio.sleep(0.1)
+    joys = [e for e in [q.get_nowait() for _ in range(q.qsize())] if e.get("type") == "joystick"]
+    assert joys, joys
+    jev = joys[-1]
+    assert abs(jev["x"] - 0.5) < 0.01 and jev["y"] == -1 and jev["z"] == 0 and jev["btn"] == 1 \
+        and jev["ctrl"] == "cm04", jev
+
+    # 200 ms sem 0x26 -> zera os eixos e emite de novo
+    await asyncio.sleep(THRUSTER_TIMEOUT_S + 0.1)
+    joys = [e for e in [q.get_nowait() for _ in range(q.qsize())] if e.get("type") == "joystick"]
+    assert joys and joys[-1]["x"] == 0 and joys[-1]["y"] == 0 and joys[-1]["z"] == 0 \
+        and joys[-1]["btn"] == 0, joys
+
+    # CTR Joystick Config 0x27: resposta DLC 1 [1] do joystick -> sim joystick_mode mode=1
+    while not q.empty():
+        q.get_nowait()
+    injector.send(can.Message(arbitration_id=mtnet_id(0x07, 0xFF, 0x24, 0x27),
+                              data=bytes([1]), is_extended_id=True))
+    await asyncio.sleep(0.1)
+    modes = [e for e in [q.get_nowait() for _ in range(q.qsize())] if e.get("event") == "joystick_mode"]
+    assert modes and modes[-1]["mode"] == 1, modes
 
     # engate + troca de marcha: throttle 0 enquanto o atuador anda, depois vale
     head_send(0x11, bytes([0x31]))

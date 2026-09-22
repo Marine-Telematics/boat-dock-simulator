@@ -26,7 +26,8 @@ joystick CM04) via CAN. Cronômetro, ranking por categoria, game over por colis�
 - **Boatshow:** duplo clique em `simulador.command` (Mac) ou `./simulador.sh` (Linux). Abre `http://127.0.0.1:8765/`. PEAK no Mac exige a libPCBUSB (mac-can) instalada.
 - **Sem hardware:** abrir `propulsion_scene.html` direto no browser. A seção Hardware fica em "sem adapter, tentando…", inofensivo.
 - **Teste do adapter:** `python3 can_adapter.py --selftest` (bus virtual: MTNet, engate, navigate, watchdog, auto_engage, master). Único teste automatizado do projeto; rode após mexer no adapter.
-- **Sintaxe do JS** após editar o HTML: extrair o `<script>` e `node --check`.
+- **Sintaxe do JS** após editar o HTML (um único `<script>`):
+  `python3 -c "import re;open('/tmp/scene.js','w').write(re.search(r'<script[^>]*>(.*?)</script>',open('propulsion_scene.html').read(),re.S).group(1))" && node --check /tmp/scene.js`
 - `/adapter` na porta 8765 é a página de escolha manual de canal (raramente necessária).
 
 ## Fluxo do `propulsion_scene.html` (na ordem em que o JS está)
@@ -45,7 +46,9 @@ joystick CM04) via CAN. Cronômetro, ranking por categoria, game over por colis�
 
 ## Contrato WebSocket (adapter → HTML)
 
-`status` (searching / connected / reconnecting) · `state` ~1 Hz com `master` e as ECUs (throttle já efetivo) · `sim` (engage com `ack`, navigate com gear/throttle **aplicados**, navigate_ignored, watchdog_safe aos 200 ms, watchdog_disengage a 1 s, ctr_status com `commanding`; todos com `by` e `ctrl`) · `thruster` (name Bow/Stern, direction 0 off / 1 BE / 2 BB, power, `active`, `by`, `ctrl`; traduzido do MTNet CTR Thruster cmd 0x25 do joystick, off após 200 ms sem frame) · `frame` cru.
+`status` (searching / connected / reconnecting) · `state` ~1 Hz com `master` e as ECUs (throttle já efetivo) · `sim` (engage com `ack`, navigate com gear/throttle **aplicados**, navigate_ignored, watchdog_safe aos 200 ms, watchdog_disengage a 1 s, ctr_status com `commanding`, joystick_mode com `mode` 0 direto / 1 eixos; todos com `by` e `ctrl` salvo joystick_mode) · `thruster` (name Bow/Stern, direction 0 off / 1 BE / 2 BB, power, `active`, `by`, `ctrl`; traduzido do MTNet CTR Thruster cmd 0x25 do joystick, off após 200 ms sem frame) · `joystick` (x/y/z/btn em -1..1, `by`/`ctrl` fixo "cm04"; traduzido do CTR Joystick Axes cmd 0x26, modo "eixos" só, off após 200 ms sem frame) · `frame` cru.
+
+`GET`/`POST /joystick/mode` (só servido por http): consulta/troca o modo do joystick (CTR Joystick Config cmd 0x27, direto/eixos); resposta chega como evento `sim` `joystick_mode`.
 
 **Reiniciou o adapter com a manete ligada → re-engaje a manete** (neutro + botão de comando, ou desliga/liga): a ECU emulada sobe sem dono e, fiel ao firmware, ignora ECUN de quem não engajou. Nunca deixe dois adapters rodando: os dois publicam ECUStatus e o rpm na manete "pula".
 

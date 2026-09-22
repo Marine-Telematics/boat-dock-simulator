@@ -17,6 +17,7 @@ próprios). Abra a sessão DENTRO do repo do produto, não aqui na raiz:
 | CM01 leveler (CM200/300) | `CM01/` | Marine-Telematics/CM01 |
 | Aviação (Cirrus SR22) | `matel-aviation-fw/` + `matel-aviation-app/` | local |
 | PoC leitor de fonia ATC | `atc-radio-reader/` | local |
+| Plataforma Web (contexto Nautica) | `~/MaTel-web_platform` (fora deste workspace) | — |
 
 Todas essas pastas são repos git independentes e estão no `.gitignore` daqui
 (assim como `refs/`, `matel-p4-docs/` e os spikes `p4-*`). O iVS-2008 (CM2008)
@@ -62,7 +63,9 @@ Conventional commits em pt-BR com escopo: `docs(mtcp): …`, `feat: …`, `fix: 
   lê `.claude/qms.json` (project_id) e credenciais em
   `~/.config/matelqms/claude.json` (fora de qualquer git). Subcomandos no
   docstring do arquivo: `demandas`, `proxima`, `tarefa`, `mover`, `resultado`,
-  `perguntas`, `pilot-log`, `subtarefa`, `criar`.
+  `perguntas`, `pilot-log`, `subtarefa`, `criar`; fora do docstring ainda há
+  `projetos` (mapear ids), `orfaos` (cartões em quadros sem contexto) e
+  `pilot-resposta` (fecha uma pergunta do piloto).
 - `tools/qms-watch.sh` — piloto (launchd, 15 min): para cada contexto, pega o
   próximo cartão "A fazer" do usuário Claude e dispara `claude -p "/executar <id>"`
   headless, com trava por contexto em `.claude/.voo.lock` (trava >3h = voo
@@ -71,5 +74,6 @@ Conventional commits em pt-BR com escopo: `docs(mtcp): …`, `feat: …`, `fix: 
 - `tools/qms_narra.py` — traduz o stream-json do claude em linhas pt-BR
   postadas como `pilot_log` no card.
 - Os scripts assumem o workspace em `~/MaTel` e logs em `tools/logs/`
-  (ignorado). Se o checkout está em outro caminho, ajuste antes de instalar
-  o launchd.
+  (ignorado). **Este checkout está em `~/dev/marine/boat-dock-simulator` e
+  `~/MaTel` não existe** — os `.sh` não funcionam daqui sem ajustar os
+  caminhos (ou um symlink `~/MaTel`) antes de instalar o launchd.

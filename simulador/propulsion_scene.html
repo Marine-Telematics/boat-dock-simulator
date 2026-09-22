@@ -1833,6 +1833,11 @@ header p  { font-size:9px; letter-spacing:1.5px; color:#243a52; margin-top:6px; 
             spellcheck="false">
           <button class="hw-btn" id="hw-btn">Conectar</button>
           <div class="hw-status-txt" id="hw-status">desconectado</div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:6px">
+            <span class="hw-status-txt" id="joy-mode-txt">joystick: —</span>
+            <button class="hw-btn" id="joy-mode-direto" style="padding:2px 10px">Direto</button>
+            <button class="hw-btn" id="joy-mode-eixos" style="padding:2px 10px">Eixos</button>
+          </div>
         </div>
       </div>
     </div>
@@ -3507,7 +3512,10 @@ function hwConnect() {
   try { hwSocket = new WebSocket(url); }
   catch (e) { hwSetState('', 'URL inválida'); return; }
 
-  hwSocket.onopen = () => { hwBackoff = 1000; hwSetState('connected', 'conectado'); };
+  hwSocket.onopen = () => {
+    hwBackoff = 1000; hwSetState('connected', 'conectado');
+    if (location.protocol.startsWith('http') && location.host) fetch('/joystick/mode').catch(() => {});
+  };
 
   hwSocket.onmessage = (e) => {
     let msg;
@@ -3534,8 +3542,22 @@ function hwConnect() {
       } else if (msg.event === 'watchdog_safe' || msg.event === 'watchdog_disengage') {
         // 200 ms sem ECUN → neutro/0; 1 s → desengaja. Nos dois casos o lado para.
         hwApplyNav(msg.ecu, 0, 0);
+      } else if (msg.event === 'joystick_mode') {
+        joyModeTxt.textContent = 'joystick: ' + (msg.mode === 1 ? 'eixos' : 'direto');
       }
       // navigate_ignored: comando de quem não é o dono — nada a aplicar
+      return;
+    }
+
+    // CTR Joystick Axes 0x26 (modo eixos): o joystick não engaja, quem interpreta é a tela
+    if (msg.type === 'joystick') {
+      hwSetSource(msg.by, msg.ctrl);
+      switchToJoystick();   // hwSetSource força manetes; eixos comandam o joystick de tela
+      // Convenção confirmada em calcThrust()/applyXY(): X>0=BE, Y>0=avante, Z>0=horário
+      // (BB avante/BE ré) já são o mesmo sinal de sway/surge/yaw da tela — sem inversão.
+      state.surge = msg.y;
+      state.sway  = msg.x;
+      state.yaw   = msg.z;
       return;
     }
 
@@ -3597,13 +3619,27 @@ document.getElementById('hw-btn').addEventListener('click', (e) => {
 });
 hwConnect();   // liga sozinho ao abrir: sem passo manual no estande
 
-// Bloqueia drag das manetes só quando um posto físico já comandou
-// (hwActiveSource), não pelo simples fato do WebSocket estar aberto.
+// Modo do joystick (0x27): botões só valem servido por http (mesma checagem do /ranking)
+const joyModeTxt = document.getElementById('joy-mode-txt');
+function setJoystickMode(mode) {
+  if (!(location.protocol.startsWith('http') && location.host)) return;
+  fetch('/joystick/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ mode }) }).catch(() => {});
+}
+document.getElementById('joy-mode-direto').addEventListener('click', () => setJoystickMode(0));
+document.getElementById('joy-mode-eixos').addEventListener('click', () => setJoystickMode(1));
+
+// Bloqueia drag das manetes e do joystick de tela só quando um posto físico já
+// comandou (hwActiveSource), não pelo simples fato do WebSocket estar aberto.
 document.addEventListener('mousedown', (e) => {
-  if (hwActiveSource && e.target.classList.contains('manete-handle')) e.stopImmediatePropagation();
+  if (hwActiveSource && (e.target.classList.contains('manete-handle')
+      || e.target.classList.contains('joy-handle') || e.target.classList.contains('joy-outer')))
+    e.stopImmediatePropagation();
 }, true);
 document.addEventListener('touchstart', (e) => {
-  if (hwActiveSource && e.target.classList.contains('manete-handle')) e.stopImmediatePropagation();
+  if (hwActiveSource && (e.target.classList.contains('manete-handle')
+      || e.target.classList.contains('joy-handle') || e.target.classList.contains('joy-outer')))
+    e.stopImmediatePropagation();
 }, { capture: true, passive: false });
 
 // ══════════════════════════════════════════════════
